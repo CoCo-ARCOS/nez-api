@@ -878,7 +878,6 @@ components:
       name: access_token
 
   schemas:
-  schemas:
     StopTriggerRequest:
       type: object
       required: [id, puzzle_name]
