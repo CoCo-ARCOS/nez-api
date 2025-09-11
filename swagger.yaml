@@ -14,6 +14,8 @@ tags:
     description: Non-Functional Requirements catalog
   - name: Systems
     description: Create and manage systems (a.k.a. workflows)
+  - name: Catalogs
+    description: Catalog views from the Pub/Sub gateway
 
 paths:
   /buildingblocks:
@@ -527,6 +529,323 @@ paths:
                 $ref: '#/components/schemas/MessageResponse'
         '406':
           description: Not acceptable (unsupported method at router level)
+  /pub_sub/v1/view/catalogs/user/{tokenuser}/subscribed:
+    # This endpoint lives on the API Gateway host, so we override servers here.
+    servers:
+      - url: http://APIGATEWAY_HOST
+    parameters:
+      - $ref: '#/components/parameters/TokenUser'
+      - $ref: '#/components/parameters/AccessToken'
+      - name: id
+        in: query
+        required: true
+        description: System (workflow) ID whose stages will be scanned for catalog sources.
+        schema:
+          type: integer
+    get:
+      tags: [Catalogs]
+      summary: List catalog sources referenced by stages in a System
+      description: >
+        Returns the catalogs referenced by the stages inside a System (workflow) for the
+        given user. The handler aggregates catalog sources across all stages and returns
+        them as a nested array (one array per stage).
+      security:
+        - AccessTokenQuery: []
+      responses:
+        '200':
+          description: Nested list of catalog sources by stage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogListNested'
+              examples:
+                example:
+                  value:
+                    -  # Stage 1 catalogs
+                      - { type: "catalog", token: "CATALOG_TOKEN_1" }
+                      - { type: "catalog", token: "CATALOG_TOKEN_2" }
+                    -  # Stage 2 catalogs
+                      - { type: "catalog", token: "CATALOG_TOKEN_3" }
+        '404':
+          description: No data found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogListNested'
+        '400':
+          description: Missing access_token (router-level check)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '406':
+          description: Not acceptable (unsupported method at router level)
+  /workflows/run:
+    post:
+      tags: [Systems]
+      summary: Run (deploy) a System
+      description: >
+        Triggers deployment for a System (internally "workflow"). Requires `access_token`
+        and `tokenuser` in the query and expects `id` (system id) and `platform`
+        in the JSON body. Builds a GEB cfg, registers a deployment, and calls the
+        Deployer service. Returns the Deployer status code (e.g., 200 on success).
+      security:
+        - AccessTokenQuery: []
+      parameters:
+        - $ref: '#/components/parameters/AccessToken'
+        - $ref: '#/components/parameters/TokenUser'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentTriggerRequest'
+            examples:
+              compose:
+                value: { id: 55, platform: 1 }
+              swarm:
+                value: { id: 55, platform: 2 }
+      responses:
+        '200':
+          description: Deployment accepted by Deployer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentTriggerResponse'
+              examples:
+                ok:
+                  value:
+                    wf_name: "EO Ingestion"
+                    deployment_mode: "compose"
+                    id_deployment: 123
+                    status: "Deployed"
+                    wf_log: true
+                    deployed: "2025-09-11 12:34:56"
+        '404':
+          description: Token error, system not found, or deploy failed upstream
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                err: { value: { msg: "Error" } }
+        '400':
+          description: Missing access_token (router-level check)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '406':
+          description: Not acceptable (only POST is allowed)
+        '500':
+          description: Server error while saving cfg or logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                fileErr:
+                  value:
+                    msg: "Unable to save file2"
+                logErr:
+                  value:
+                    msg: "Unable to save logs"
+                    path: "/var/www/html/logs/deployment/EO Ingestion_123.log"
+
+  /workflows/log:
+    post:
+      tags: [Systems]
+      summary: Read a System deployment log
+      description: >
+        Reads the log file for a System (workflow) from the backend host.
+        Returns **200** with `{ msg: "log found", log: "<content>" }` if present;
+        **404** with `{ msg: "Empty data <name>" }` if not found; **400** if `access_token`
+        is missing; **406** if method != POST.
+      security:
+        - AccessTokenQuery: []
+      parameters:
+        - $ref: '#/components/parameters/AccessToken'
+        - $ref: '#/components/parameters/TokenUser'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogReadRequest'
+            examples:
+              example:
+                value:
+                  id: 55
+                  name: "EO_Ingestion"
+                  folder: "deployment"
+      responses:
+        '200':
+          description: Log found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogReadResponse'
+              examples:
+                ok:
+                  value:
+                    msg: "log found"
+                    log: |
+                      [2025-09-11 12:34:50] Starting deploy...
+                      [2025-09-11 12:34:56] Stack deployed successfully.
+        '404':
+          description: Log not found or empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                missing:
+                  value:
+                    msg: "Empty data EO_Ingestion"
+        '400':
+          description: Missing access_token (router-level check)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '406':
+          description: Not acceptable (only POST is allowed)
+  /workflows/execute:
+    post:
+      tags: [Systems]
+      summary: Execute a System
+      description: >
+        Executes a previously **deployed** System (internally "workflow"). Requires
+        `access_token`, `tokenuser`, and `apikey` in the query, and expects
+        `id` (system id) and `puzzle_name` in the JSON body. The server opens the
+        existing cfg file `/var/www/html/geb/cfg-files/{puzzle_name}.cfg`, registers
+        an execution, and invokes the Deployer `/stacks/run`. Returns the Deployer
+        status code (e.g., **200** on success).
+      security:
+        - AccessTokenQuery: []
+      parameters:
+        - $ref: "#/components/parameters/AccessToken"
+        - $ref: "#/components/parameters/TokenUser"
+        - $ref: "#/components/parameters/ApiKeyQuery"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutionTriggerRequest"
+            examples:
+              runExample:
+                value:
+                  id: 55
+                  puzzle_name: "EO_Ingestion"
+      responses:
+        "200":
+          description: Execution accepted by Deployer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionTriggerResponse"
+              examples:
+                ok:
+                  value:
+                    wf_name: "EO_Ingestion"
+                    deployment_mode: "compose"
+                    id_execution: 987
+                    executed: "2025-09-11 13:45:10"
+                    status: "Ok"
+                    status2: 200
+                    wf_log: true
+        "404":
+          description: Not deployed, token error, or upstream error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                notDeployed: { value: { msg: "Puzzle not deployed" } }
+                generic: { value: { msg: "Error" } }
+        "400":
+          description: Missing access_token (router-level check)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "406":
+          description: Not acceptable (only POST is allowed)
+        "500":
+          description: Server error opening cfg or saving logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                fileErr:
+                  value:
+                    msg: "Unable to open configuration file /var/www/html/geb/cfg-files/EO_Ingestion.cfg"
+                logErr:
+                  value:
+                    msg: "Unable to save logs"
+                    path: "/var/www/html/logs/execution/EO_Ingestion_987.log"
+  /workflows/stop:
+    post:
+      tags: [Systems]
+      summary: Stop a running System
+      description: >
+        Stops a previously deployed System (internally "workflow"). Requires
+        `access_token`, `tokenuser`, and `apikey` in the query, and expects
+        `id` (system id) and `puzzle_name` in the JSON body. The backend forwards
+        the request to the Deployer `/stacks/stop`. Returns the Deployer status
+        code (e.g., **200** on success).
+      security:
+        - AccessTokenQuery: []
+      parameters:
+        - $ref: "#/components/parameters/AccessToken"
+        - $ref: "#/components/parameters/TokenUser"
+        - $ref: "#/components/parameters/ApiKeyQuery"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopTriggerRequest"
+            examples:
+              stopExample:
+                value:
+                  id: 55
+                  puzzle_name: "EO_Ingestion"
+      responses:
+        "200":
+          description: Stop accepted by Deployer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopTriggerResponse"
+              examples:
+                ok:
+                  value:
+                    wf_name: "EO_Ingestion"
+                    deployment_mode: "compose"
+                    status: "Ok"
+                    status2: 200
+                    executed: "2025-09-11 14:05:30"
+        "404":
+          description: Not deployed, token error, or upstream error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+              examples:
+                notDeployed: { value: { msg: "Puzzle not deployed" } }
+                generic: { value: { msg: "Error" } }
+        "400":
+          description: Missing access_token (router-level check)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "406":
+          description: Not acceptable (only POST is allowed)
+
 
 components:
   parameters:
@@ -537,6 +856,20 @@ components:
       description: User access token used by router to allow the request to reach the handler.
       schema:
         type: string
+    TokenUser:
+      name: tokenuser
+      in: path
+      required: true
+      description: User token used by the API Gateway route.
+      schema:
+        type: string
+    ApiKeyQuery:
+      name: apikey
+      in: query
+      required: true
+      description: API key forwarded to the Deployer during execution.
+      schema:
+        type: string
 
   securitySchemes:
     AccessTokenQuery:
@@ -545,6 +878,183 @@ components:
       name: access_token
 
   schemas:
+  schemas:
+    StopTriggerRequest:
+      type: object
+      required: [id, puzzle_name]
+      properties:
+        id:
+          type: integer
+          description: System (workflow) identifier to stop.
+          example: 55
+        puzzle_name:
+          type: string
+          description: Workflow name used to resolve resources in the Deployer.
+          example: EO_Ingestion
+
+    StopTriggerResponse:
+      type: object
+      description: >
+        Stop operation metadata echoed/augmented by the backend and Deployer.
+        Fields may vary depending on Deployer output.
+      properties:
+        wf_name:
+          type: string
+          example: EO_Ingestion
+        deployment_mode:
+          type: string
+          enum: [compose, swarm]
+          example: compose
+        # id_execution may be absent here per current PHP (uses undefined $id_execution).
+        id_execution:
+          nullable: true
+          description: Execution identifier if available.
+        executed:
+          type: string
+          description: Timestamp `Y-m-d H:i:s` recorded by backend.
+          example: "2025-09-11 14:05:30"
+        status:
+          type: string
+          example: Ok
+        status2:
+          type: integer
+          description: HTTP status code returned by Deployer.
+          example: 200
+      additionalProperties: true
+    ExecutionTriggerRequest:
+      type: object
+      required: [id, puzzle_name]
+      properties:
+        id:
+          type: integer
+          description: System (workflow) identifier to execute.
+          example: 55
+        puzzle_name:
+          type: string
+          description: Base name of the cfg file (without `.cfg`).
+          example: EO_Ingestion
+
+    ExecutionTriggerResponse:
+      type: object
+      description: >
+        Execution metadata produced/augmented by the backend and Deployer.
+        Fields may vary; these are typical on success.
+      properties:
+        wf_name:
+          type: string
+          example: EO_Ingestion
+        deployment_mode:
+          type: string
+          enum: [compose, swarm]
+          example: compose
+        id_execution:
+          type: integer
+          example: 987
+        executed:
+          type: string
+          description: Timestamp `Y-m-d H:i:s`.
+          example: "2025-09-11 13:45:10"
+        status:
+          type: string
+          example: Ok
+        status2:
+          type: integer
+          description: HTTP status code returned by Deployer.
+          example: 200
+        wf_log:
+          type: boolean
+          example: true
+      additionalProperties: true
+    LogReadRequest:
+      type: object
+      required: [id, name, folder]
+      properties:
+        id:
+          type: integer
+          description: System (workflow) identifier.
+          example: 55
+        name:
+          type: string
+          description: Base filename (before `_{id}.log`).
+          example: EO_Ingestion
+        folder:
+          type: string
+          description: Subfolder under `/var/www/html/logs/` that contains the log.
+          example: deployment
+
+    LogReadResponse:
+      type: object
+      properties:
+        msg:
+          type: string
+          example: log found
+        log:
+          type: string
+          description: Raw log file contents.
+          example: "[2025-09-11 12:34:56] Stack deployed successfully."
+    DeploymentTriggerRequest:
+      type: object
+      required: [id, platform]
+      properties:
+        id:
+          type: integer
+          description: System (workflow) identifier to deploy.
+          example: 55
+        platform:
+          type: integer
+          description: Deployment platform selector (1 = compose, 2 = swarm).
+          enum: [1, 2]
+          example: 1
+
+    DeploymentTriggerResponse:
+      type: object
+      description: >
+        Deployment metadata echoed/augmented by the backend and Deployer service.
+        Fields may vary; these are typical for a successful deployment.
+      properties:
+        wf_name:
+          type: string
+          example: EO Ingestion
+        deployment_mode:
+          type: string
+          enum: [compose, swarm]
+          example: compose
+        id_deployment:
+          type: integer
+          example: 123
+        status:
+          type: string
+          example: Deployed
+        wf_log:
+          type: boolean
+          example: true
+        deployed:
+          type: string
+          description: Timestamp `Y-m-d H:i:s`.
+          example: "2025-09-11 12:34:56"
+      additionalProperties: true  
+
+    CatalogRef:
+      type: object
+      description: A reference to a catalog used as a source for a stage.
+      properties:
+        type:
+          type: string
+          example: catalog
+        token:
+          type: string
+          example: CATALOG_TOKEN_1
+      additionalProperties: true
+
+    CatalogListNested:
+      type: array
+      description: >
+        Nested list where each item corresponds to a stage's catalog sources; each stage item
+        is an array of catalog references.
+      items:
+        type: array
+        items:
+          $ref: '#/components/schemas/CatalogRef'
     StageWithIO:
       type: object
       properties:
@@ -725,3 +1235,4 @@ components:
         msg:
           type: string
           example: BuildingBlock created
+      
